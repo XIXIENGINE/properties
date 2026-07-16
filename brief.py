@@ -284,6 +284,26 @@ def build_message(holdings, agg, prev, date_kst, extra_note=None):
             dod_cell = "-"
         lines.append(f"| {k} | {won(acct[k])} | {dod_cell} |")
     lines.append("")
+
+    # ── 개별 종목 상세(등락) ────────────────────
+    prev_h2 = (prev or {}).get("holdings", {}) or {}
+    lines.append("### 📄 개별 종목 상세 (전일 대비)")
+    lines.append("")
+    lines.append("| 증권사·계좌 | 종목 | 평가금액 | 수익률 | 전일 대비 |")
+    lines.append("|---|---|---:|---:|---:|")
+    for h in sorted(holdings, key=lambda x: (x["broker"], x["account"], -x["eval"])):
+        if (h["eval"] or 0) <= 0:
+            continue
+        ret = ((h["eval"] - h["cost"]) / h["cost"] * 100) if h.get("cost") else None
+        ret_c = signed_pct(ret, 1) if ret is not None else "-"
+        if prev and h["key"] in prev_h2:
+            dod = h["eval"] - prev_h2[h["key"]]
+            dcell = f"{signed_won(dod)} {arrow(dod)}"
+        else:
+            dcell = "-"
+        lines.append(f"| {h['broker']}·{h['account']} | {h['name']} | "
+                     f"{won(h['eval'])} | {ret_c} | {dcell} |")
+    lines.append("")
     foot = f"생성: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 데이터 출처: 금융자산현황표"
     if extra_note:
         foot += f" · {extra_note}"
@@ -340,6 +360,22 @@ def compute_summary(holdings, agg, prev, date_kst, extra_note=None):
         a_dod = (acct[k] - prev_acct[k]) if (prev and k in prev_acct) else None
         accounts.append({"name": k, "eval": acct[k], "dod": a_dod})
 
+    # 개별 종목 상세(보유 중인 것만, 계좌→평가금액 순)
+    prev_h = (prev or {}).get("holdings", {}) or {}
+    detail = []
+    for h in sorted(holdings, key=lambda x: (x["broker"], x["account"], -x["eval"])):
+        if (h["eval"] or 0) <= 0:
+            continue
+        ret = ((h["eval"] - h["cost"]) / h["cost"] * 100) if h.get("cost") else None
+        dod = (h["eval"] - prev_h[h["key"]]) if (prev and h["key"] in prev_h) else None
+        base = prev_h.get(h["key"])
+        dod_pct = (dod / base * 100) if (dod is not None and base) else None
+        detail.append({
+            "broker": h["broker"], "account": h["account"], "name": h["name"],
+            "eval": h["eval"], "ret": ret, "dod": dod, "dod_pct": dod_pct,
+            "weight": (h["eval"] / total_eval * 100) if total_eval else 0,
+        })
+
     d = date_kst
     return {
         "date": d,
@@ -359,6 +395,7 @@ def compute_summary(holdings, agg, prev, date_kst, extra_note=None):
         "top_holdings": top_holdings,
         "accounts": accounts,
         "acct_map": acct,
+        "detail": detail,
         "extra_note": extra_note,
     }
 
@@ -423,6 +460,36 @@ def build_slack_blocks(summary):
         acct_fields.append({"type": "mrkdwn", "text": f"*{a['name']}*\n{won(a['eval'])}{dod}"})
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*📋 계좌별 현황*"},
                    "fields": acct_fields[:10]})
+
+    # ── 개별 종목 상세 (등락) ────────────────────
+    detail = s.get("detail") or []
+    if detail:
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": "*📄 개별 종목 상세 (전일 대비)*"}})
+        # 계좌별로 그룹
+        groups = []
+        cur_key, cur = None, None
+        for it in detail:
+            k = f"{it['broker']} · {it['account']}"
+            if k != cur_key:
+                cur_key, cur = k, []
+                groups.append((k, cur))
+            cur.append(it)
+        for gname, items in groups:
+            lines = [f"*{gname}*"]
+            for it in items:
+                ret = f"{signed_pct(it['ret'], 1)}" if it["ret"] is not None else "-"
+                if it["dod"] is not None:
+                    dpct = f" ({signed_pct(it['dod_pct'], 1)})" if it["dod_pct"] is not None else ""
+                    dcell = f"  · 전일 {signed_won(it['dod'])}{dpct} {arrow(it['dod'])}"
+                else:
+                    dcell = ""
+                lines.append(f"• {it['name']}  {won(it['eval'])} · 수익 {ret}{dcell}")
+            txt = "\n".join(lines)
+            if len(txt) > 2900:  # Slack 섹션 3000자 제한 방어
+                txt = txt[:2880] + "\n…(생략)"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": txt}})
 
     ctx = f"자동 브리핑 · {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 출처: 금융자산현황표"
     if s.get("extra_note"):
@@ -566,6 +633,31 @@ h2{{font-size:15px;margin:22px 0 6px}}
             dcell = "-"
         parts.append(f'<tr><td>{_h(a["name"])}</td><td class="mono">{_h(won(a["eval"]))}</td><td>{dcell}</td></tr>')
     parts.append("</table>")
+
+    # 개별 종목 상세(등락)
+    detail = s.get("detail") or []
+    if detail:
+        parts.append('<h2>📄 개별 종목 상세 (전일 대비)</h2>'
+                     '<table><tr><th>종목</th><th>평가금액</th><th>수익률</th>'
+                     '<th>비중</th><th>전일 대비</th></tr>')
+        cur = None
+        for it in detail:
+            g = f"{it['broker']} · {it['account']}"
+            if g != cur:
+                cur = g
+                parts.append(f'<tr><td colspan="5" style="background:#eef;font-weight:600;'
+                             f'font-size:12px;color:#495057">{_h(g)}</td></tr>')
+            ret = f'<span class="mono" style="color:{col(it["ret"]) if it["ret"] is not None else "#868e96"}">' \
+                  f'{_h(signed_pct(it["ret"],1)) if it["ret"] is not None else "-"}</span>'
+            if it["dod"] is not None:
+                dp = f' ({_h(signed_pct(it["dod_pct"],1))})' if it["dod_pct"] is not None else ""
+                dcell = f'<span class="mono" style="color:{col(it["dod"])}">{_h(signed_won(it["dod"]))}{dp} {arrow(it["dod"])}</span>'
+            else:
+                dcell = "-"
+            parts.append(f'<tr><td>{_h(it["name"])}</td><td class="mono">{_h(won(it["eval"]))}</td>'
+                         f'<td>{ret}</td><td class="mono">{it["weight"]:.1f}%</td><td>{dcell}</td></tr>')
+        parts.append("</table>")
+
     foot = f'생성: {datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")} · 데이터 출처: 금융자산현황표'
     if s.get("extra_note"):
         foot += f' · {_h(s["extra_note"])}'
