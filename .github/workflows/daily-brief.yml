@@ -43,7 +43,8 @@ jobs:
           python generate.py $FLAGS
 
       - name: Commit snapshot
-        if: ${{ inputs.dry_run != 'true' }}
+        # 스케줄 실행 시 inputs가 없어 빈 값 → 커밋함. 수동 dry_run=true일 때만 건너뜀.
+        if: ${{ github.event.inputs.dry_run != 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
