@@ -96,8 +96,8 @@ def fetch_krx_price(code):
 
 
 def fetch_us_price(symbol):
-    """미국 종가(USD). Stooq CSV."""
-    try:
+    """미국 종가/현재가(USD). Stooq → Yahoo 폴백."""
+    try:  # 1) Stooq CSV
         txt = _get(f"https://stooq.com/q/l/?s={symbol.lower()}.us&f=sd2t2ohlcv&h&e=csv")
         row = list(csv.DictReader(io.StringIO(txt)))
         if row:
@@ -106,20 +106,48 @@ def fetch_us_price(symbol):
                 return c
     except Exception:
         pass
+    try:  # 2) Yahoo chart API
+        data = json.loads(_get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"))
+        meta = (((data.get("chart") or {}).get("result") or [{}])[0] or {}).get("meta") or {}
+        c = _to_float(meta.get("regularMarketPrice"))
+        if c and c > 0:
+            return c
+    except Exception:
+        pass
     return None
 
 
 def fetch_usdkrw():
-    """USD/KRW 환율."""
+    """USD/KRW 환율. 키 불필요 소스 다중 폴백."""
+    # 1) open.er-api.com (무키)
     try:
-        data = json.loads(_get(
-            "https://api.exchangerate.host/latest?base=USD&symbols=KRW"))
+        data = json.loads(_get("https://open.er-api.com/v6/latest/USD"))
         n = _to_float((data.get("rates") or {}).get("KRW"))
         if n and n > 0:
             return n
     except Exception:
         pass
-    try:  # 폴백: Stooq
+    # 2) frankfurter.app (무키)
+    try:
+        data = json.loads(_get("https://api.frankfurter.app/latest?from=USD&to=KRW"))
+        n = _to_float((data.get("rates") or {}).get("KRW"))
+        if n and n > 0:
+            return n
+    except Exception:
+        pass
+    # 3) Yahoo (KRW=X)
+    try:
+        data = json.loads(_get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/KRW=X?interval=1d&range=1d"))
+        meta = (((data.get("chart") or {}).get("result") or [{}])[0] or {}).get("meta") or {}
+        n = _to_float(meta.get("regularMarketPrice"))
+        if n and n > 0:
+            return n
+    except Exception:
+        pass
+    # 4) Stooq
+    try:
         txt = _get("https://stooq.com/q/l/?s=usdkrw&f=sd2t2ohlcv&h&e=csv")
         row = list(csv.DictReader(io.StringIO(txt)))
         if row:
@@ -144,7 +172,8 @@ def enrich_holdings(holdings):
     fx = fetch_usdkrw() if need_us else None
 
     report = {"fx": fx, "live": 0, "fallback": 0, "held_skipped": 0,
-              "failures": [], "us_priced": 0}
+              "failures": [], "us_priced": 0, "debug": [],
+              "sheet_total": sum(h.get("eval") or 0 for h in holdings)}
 
     for h in holdings:
         market, code = classify(h["ticker"])
@@ -160,7 +189,9 @@ def enrich_holdings(holdings):
         if market == "kr":
             price = fetch_krx_price(code)
             if price:
-                h["eval"] = int(round(qty * price))
+                new_eval = int(round(qty * price))
+                report["debug"].append((h["name"], qty, price, sheet_eval, new_eval))
+                h["eval"] = new_eval
                 report["live"] += 1
             else:
                 report["fallback"] += 1
@@ -168,13 +199,16 @@ def enrich_holdings(holdings):
         else:  # us
             price = fetch_us_price(code)
             if price and fx:
-                h["eval"] = int(round(qty * price * fx))
+                new_eval = int(round(qty * price * fx))
+                report["debug"].append((h["name"], qty, price, sheet_eval, new_eval))
+                h["eval"] = new_eval
                 report["live"] += 1
                 report["us_priced"] += 1
             else:
                 report["fallback"] += 1
                 report["failures"].append(h["name"])
 
+    report["live_total"] = sum(h.get("eval") or 0 for h in holdings)
     return holdings, report
 
 

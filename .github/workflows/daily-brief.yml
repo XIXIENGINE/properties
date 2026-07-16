@@ -16,6 +16,10 @@ on:
         description: "직전과 동일해도 강제 발송(변동 없어도 전송)"
         type: boolean
         default: false
+      debug:
+        description: "시세 계산 상세 로그 출력(PRICE_DEBUG)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -50,6 +54,10 @@ jobs:
           if [ "${{ inputs.force_send }}" = "true" ]; then
             FLAGS="$FLAGS --always-send"
             echo "::notice::force_send — 변동 없어도 발송"
+          fi
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            export PRICE_DEBUG=1
+            echo "::notice::PRICE_DEBUG — 시세 계산 상세 출력"
           fi
           python generate.py $FLAGS
 

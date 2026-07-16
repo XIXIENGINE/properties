@@ -171,8 +171,14 @@ def main():
         fx_txt = f"{rep['fx']:,.1f}" if rep.get("fx") else "N/A"
         print(f"[price] 실시간 {rep['live']}건 · 폴백 {rep['fallback']}건 · "
               f"보유0 스킵 {rep['held_skipped']}건 · USD/KRW {fx_txt}")
+        print(f"[price] 시트합계 {rep.get('sheet_total', 0):,}원 → "
+              f"시세합계 {rep.get('live_total', 0):,}원 "
+              f"(차이 {rep.get('live_total', 0) - rep.get('sheet_total', 0):+,}원)")
         if rep["failures"]:
             print(f"[price] 조회 실패(시트값 사용): {', '.join(rep['failures'])}")
+        if os.environ.get("PRICE_DEBUG", "").strip() and rep.get("debug"):
+            for name, qty, price, se, ne in rep["debug"][:8]:
+                print(f"[debug] {name}: {qty:g}주 × {price:,.2f} = {ne:,} (시트 {se:,})")
 
     agg = brief.aggregate(holdings)
     print(f"[agg] 총 평가금액 {agg['total_eval']:,}원 · 매입 {agg['total_cost']:,}원")
