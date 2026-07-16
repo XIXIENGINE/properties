@@ -366,13 +366,13 @@ def compute_summary(holdings, agg, prev, date_kst, extra_note=None):
     for h in sorted(holdings, key=lambda x: (x["broker"], x["account"], -x["eval"])):
         if (h["eval"] or 0) <= 0:
             continue
-        ret = ((h["eval"] - h["cost"]) / h["cost"] * 100) if h.get("cost") else None
-        dod = (h["eval"] - prev_h[h["key"]]) if (prev and h["key"] in prev_h) else None
-        base = prev_h.get(h["key"])
-        dod_pct = (dod / base * 100) if (dod is not None and base) else None
+        h_ret = ((h["eval"] - h["cost"]) / h["cost"] * 100) if h.get("cost") else None
+        h_base = prev_h.get(h["key"])
+        h_dod = (h["eval"] - h_base) if (prev and h["key"] in prev_h) else None
+        h_dod_pct = (h_dod / h_base * 100) if (h_dod is not None and h_base) else None
         detail.append({
             "broker": h["broker"], "account": h["account"], "name": h["name"],
-            "eval": h["eval"], "ret": ret, "dod": dod, "dod_pct": dod_pct,
+            "eval": h["eval"], "ret": h_ret, "dod": h_dod, "dod_pct": h_dod_pct,
             "weight": (h["eval"] / total_eval * 100) if total_eval else 0,
         })
 
