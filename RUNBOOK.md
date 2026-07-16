@@ -1,45 +1,36 @@
-# 운영 런북 — 매일 오전 8시 브리핑 세션
+# 운영 런북 / 트러블슈팅
 
-예약 트리거(Routine)는 매일 KST 08:00에 새 세션을 띄우고, 아래 프롬프트를 실행합니다.
-이 문서는 그 프롬프트를 버전 관리하기 위한 사본입니다. 프롬프트를 바꾸려면 Routine을
-업데이트하고 이 파일도 함께 수정하세요.
+매일 08:00 KST에 `.github/workflows/daily-brief.yml` 이 실행됩니다.
 
-## 트리거 설정
+## 정상 흐름
 
-- 스케줄: `0 8 * * *` (KST)
-- 실행 모드: 매 발화 시 새 세션 생성 (create_new_session_on_fire)
-- 대상 저장소/브랜치: `xixiengine/properties` · `claude/daily-asset-slack-brief-lkmg43`
+1. 시트 xlsx 다운로드 → 보유 종목 파싱
+2. 전일 스냅샷(`data/latest.json`)과 비교
+3. Slack 발송(웹훅) + `data/brief.html` 생성
+4. 스냅샷/히스토리 커밋·푸시
 
-## 프롬프트 (Routine이 매일 실행)
+## 자주 겪는 문제
 
-```
-매일 자산 브리핑을 생성해 Slack으로 보낸다. 아래를 순서대로 정확히 수행하라.
+| 증상 | 원인 / 조치 |
+|---|---|
+| Slack에 안 옴, 로그에 "SLACK_WEBHOOK_URL 없음" | 시크릿 미등록. README의 활성화 절차대로 `SLACK_WEBHOOK_URL` 등록 |
+| "보유 종목을 파싱하지 못했습니다" | 시트 탭/헤더 구조 변경. `generate.py` 의 `HEADER_MAP` 또는 헤더 탐색 로직 확인 |
+| Slack HTTP 404/410 | 웹훅 URL 만료/삭제. 웹훅 재생성 후 시크릿 갱신 |
+| 시트 다운로드 403 | 시트 공유가 '링크 공개(anyone reader)'인지 확인 |
+| 전일 대비가 항상 "첫 브리핑" | `data/latest.json` 이 커밋되지 않음. 워크플로 push 권한(`contents: write`) 및 커밋 스텝 확인 |
+| 총액이 이상 | 시트에 새 계좌/종목 추가 시 자동 반영됨. 값 오류면 시트 원본 확인 |
 
-1. 저장소 준비:
-   git fetch origin claude/daily-asset-slack-brief-lkmg43
-   git checkout claude/daily-asset-slack-brief-lkmg43
-   git pull --ff-only origin claude/daily-asset-slack-brief-lkmg43
+## 발송 시각 변경
 
-2. 시트 읽기: Google Drive 도구 read_file_content 로
-   fileId=1MLuYEdJUUuhQ6V3hp7WSmsIFeFRo9LIHL23_wcdezFw 를 읽는다.
-   반환된 마크다운 표 전체를 그대로 data/today_raw.md 에 저장한다.
+`daily-brief.yml` 의 cron 을 UTC로 지정. 예: 09:00 KST = `0 0 * * *`, 07:00 KST = `0 22 * * *`.
+GitHub Actions 스케줄은 부하에 따라 수 분 지연될 수 있습니다.
 
-3. 브리핑 생성: python3 brief.py --input data/today_raw.md
-   (오류가 나면 파싱 실패이므로 중단하고, Slack 채널 C0BHDG42Y2K 에
-    "⚠️ 자산 브리핑 생성 실패: <오류요약>" 만 보낸다.)
+## 수동 실행
 
-4. 발송: data/brief.md 내용을 읽어 Slack 채널 C0BHDG42Y2K 로 그대로 보낸다.
+GitHub → Actions → "자산 데일리 브리핑" → Run workflow
+(`dry_run` 체크 시 파싱만 검증하고 저장·발송하지 않음)
 
-5. 커밋: git add data/latest.json data/history.csv data/snapshots
-   git commit -m "chore: 자산 브리핑 스냅샷 <오늘 날짜>"
-   git push origin claude/daily-asset-slack-brief-lkmg43
+## 데이터 재설정
 
-브리핑 메시지 본문은 절대 창작하지 말고 brief.py 가 생성한 data/brief.md 를 그대로 쓴다.
-```
-
-## 장애 대응
-
-- **시트 접근 실패 / 연결 없음**: 새 세션에 Google Drive·Slack 연동이 없으면 실패한다.
-  이 경우 GitHub Actions + 서비스계정(시트 공유) + Slack Webhook 방식으로 전환한다.
-- **파싱 실패**: 시트 컬럼 구조가 바뀌면 `brief.py` 의 `parse_holdings` 컬럼 인덱스를 조정.
-- **중복/누락**: `data/history.csv` 는 같은 날짜를 덮어쓰므로 재실행해도 안전하다.
+- 전일 비교를 초기화하려면 `data/latest.json` 삭제 후 커밋 → 다음 실행이 '첫 브리핑'이 됨
+- `data/history.csv` 는 같은 날짜를 덮어쓰므로 재실행해도 안전

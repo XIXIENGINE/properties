@@ -1,0 +1,56 @@
+name: 자산 데일리 브리핑
+
+# 매일 08:00 KST = 23:00 UTC. (GitHub Actions cron은 UTC 기준)
+on:
+  schedule:
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "테스트 실행(스냅샷 저장·Slack 발송 생략)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet openpyxl
+
+      - name: Generate & send brief
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            FLAGS="--dry-run --no-slack"
+            echo "::notice::dry-run 모드 — 스냅샷/Slack 생략"
+          fi
+          python generate.py $FLAGS
+
+      - name: Commit snapshot
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/latest.json data/history.csv data/snapshots data/brief.html
+          if git diff --cached --quiet; then
+            echo "변경 없음 — 커밋 건너뜀"
+          else
+            git commit -m "chore: 자산 브리핑 스냅샷 $(TZ=Asia/Seoul date +%Y-%m-%d)"
+            git push
+          fi

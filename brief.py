@@ -289,6 +289,281 @@ def build_message(holdings, agg, prev, date_kst):
     return "\n".join(lines), acct
 
 
+def compute_summary(holdings, agg, prev, date_kst):
+    """세 가지 렌더러(마크다운/Slack/HTML)가 공유하는 계산 결과."""
+    total_eval = agg["total_eval"]
+    total_cost = agg["total_cost"]
+    total_ret = ((total_eval - total_cost) / total_cost * 100) if total_cost else None
+
+    has_prev = bool(prev and prev.get("total_eval") is not None)
+    dod = (total_eval - prev["total_eval"]) if has_prev else None
+    dod_pct = (dod / prev["total_eval"] * 100) if has_prev and prev["total_eval"] else None
+
+    prev_nat = (prev or {}).get("by_nature", {}) or {}
+    natures = []
+    for nat in sorted(agg["by_nature"].keys(), key=nature_sort_key):
+        b = agg["by_nature"][nat]
+        weight = (b["eval"] / total_eval * 100) if total_eval else 0
+        nat_dod = (b["eval"] - prev_nat[nat]["eval"]) if (prev and nat in prev_nat) else None
+        natures.append({"nat": nat, "eval": b["eval"], "weight": weight, "dod": nat_dod})
+
+    gainers, losers, top_holdings = [], [], []
+    if prev and prev.get("holdings"):
+        prev_h = prev["holdings"]
+        moves = []
+        for h in holdings:
+            if h["key"] in prev_h:
+                change = h["eval"] - prev_h[h["key"]]
+                base = prev_h[h["key"]]
+                pct = (change / base * 100) if base else None
+                if change != 0:
+                    moves.append({"h": h, "change": change, "pct": pct})
+        gainers = sorted([m for m in moves if m["change"] > 0],
+                         key=lambda x: -x["change"])[:5]
+        losers = sorted([m for m in moves if m["change"] < 0],
+                        key=lambda x: x["change"])[:5]
+    else:
+        for h in sorted(holdings, key=lambda h: -h["eval"])[:5]:
+            w = (h["eval"] / total_eval * 100) if total_eval else 0
+            top_holdings.append({"h": h, "weight": w})
+
+    acct = {}
+    for h in holdings:
+        k = f"{h['broker']} · {h['account']}"
+        acct[k] = acct.get(k, 0) + h["eval"]
+    prev_acct = (prev or {}).get("by_account", {}) or {}
+    accounts = []
+    for k in sorted(acct.keys(), key=lambda x: -acct[x]):
+        a_dod = (acct[k] - prev_acct[k]) if (prev and k in prev_acct) else None
+        accounts.append({"name": k, "eval": acct[k], "dod": a_dod})
+
+    d = date_kst
+    return {
+        "date": d,
+        "header_date": f"{d.strftime('%Y-%m-%d')} ({WEEKDAYS_KO[d.weekday()]})",
+        "total_eval": total_eval,
+        "total_cost": total_cost,
+        "total_ret": total_ret,
+        "pl": total_eval - total_cost,
+        "has_prev": has_prev,
+        "prev_eval": prev["total_eval"] if has_prev else None,
+        "dod": dod,
+        "dod_pct": dod_pct,
+        "natures": natures,
+        "gainers": gainers,
+        "losers": losers,
+        "top_holdings": top_holdings,
+        "accounts": accounts,
+        "acct_map": acct,
+    }
+
+
+def build_slack_blocks(summary):
+    """Slack Incoming Webhook용 Block Kit blocks 리스트."""
+    s = summary
+    blocks = []
+    blocks.append({"type": "header", "text": {
+        "type": "plain_text", "text": f"📊 자산 데일리 브리핑 — {s['header_date']}",
+        "emoji": True}})
+
+    if s["has_prev"]:
+        dod_line = (f"전일 대비 *{signed_won(s['dod'])}*  ({signed_pct(s['dod_pct'])}) "
+                    f"{arrow(s['dod'])}  ·  전일 {won(s['prev_eval'])}")
+    else:
+        dod_line = "_첫 브리핑입니다 — 전일 비교는 내일부터 제공됩니다._"
+    top_text = f"*💰 총 평가금액*\n*{won(s['total_eval'])}*\n{dod_line}"
+    if s["total_ret"] is not None:
+        top_text += (f"\n📈 총 수익률 *{signed_pct(s['total_ret'], 1)}*  "
+                     f"(평가손익 {signed_won(s['pl'])} · 매입 {won(s['total_cost'])})")
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": top_text}})
+    blocks.append({"type": "divider"})
+
+    # 성격별 (2열 필드)
+    nat_fields = []
+    for n in s["natures"]:
+        emoji = NATURE_EMOJI.get(n["nat"], "•")
+        dod = f"  ({signed_won(n['dod'])} {arrow(n['dod'])})" if n["dod"] is not None else ""
+        nat_fields.append({"type": "mrkdwn",
+                           "text": f"{emoji} *{n['nat']}*\n{won(n['eval'])} · {n['weight']:.1f}%{dod}"})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*성격별 현황*"},
+                   "fields": nat_fields[:10]})
+    blocks.append({"type": "divider"})
+
+    # 상승/하락 TOP 또는 상위 종목
+    if s["gainers"] or s["losers"]:
+        if s["gainers"]:
+            txt = "*🔺 오늘의 상승 TOP*\n" + "\n".join(
+                f"• *{m['h']['name']}*  {signed_won(m['change'])} ({signed_pct(m['pct'],1)}) · {m['h']['account']}"
+                for m in s["gainers"])
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": txt}})
+        if s["losers"]:
+            txt = "*🔻 오늘의 하락 TOP*\n" + "\n".join(
+                f"• *{m['h']['name']}*  {signed_won(m['change'])} ({signed_pct(m['pct'],1)}) · {m['h']['account']}"
+                for m in s["losers"])
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": txt}})
+    elif s["top_holdings"]:
+        txt = "*💎 평가금액 상위 종목*\n" + "\n".join(
+            f"• *{t['h']['name']}*  {won(t['h']['eval'])} ({t['weight']:.1f}%) · {t['h']['account']}"
+            for t in s["top_holdings"])
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": txt}})
+    else:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": "_전일 대비 개별 종목 변동이 없습니다._"}})
+    blocks.append({"type": "divider"})
+
+    # 계좌별 (2열 필드)
+    acct_fields = []
+    for a in s["accounts"]:
+        dod = f"  ({signed_won(a['dod'])} {arrow(a['dod'])})" if a["dod"] is not None else ""
+        acct_fields.append({"type": "mrkdwn", "text": f"*{a['name']}*\n{won(a['eval'])}{dod}"})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*📋 계좌별 현황*"},
+                   "fields": acct_fields[:10]})
+
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+                   "text": f"자동 브리핑 · {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 출처: 금융자산현황표"}]})
+    return blocks
+
+
+def persist_snapshot(agg, acct, prev, date_str, state_path, history_path, snapshots_dir):
+    """오늘 스냅샷을 저장하고 히스토리 CSV를 누적한다(같은 날짜는 덮어씀)."""
+    state = {
+        "date": date_str,
+        "total_eval": agg["total_eval"],
+        "total_cost": agg["total_cost"],
+        "by_nature": agg["by_nature"],
+        "by_account": acct,
+        "holdings": agg["holdings"],
+    }
+    os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+    os.makedirs(snapshots_dir, exist_ok=True)
+    with open(os.path.join(snapshots_dir, f"{date_str}.json"), "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+    total_ret = ((agg["total_eval"] - agg["total_cost"]) / agg["total_cost"] * 100
+                 ) if agg["total_cost"] else 0
+    dod = (agg["total_eval"] - prev["total_eval"]) if prev and prev.get("total_eval") else 0
+    dod_pct = (dod / prev["total_eval"] * 100) if prev and prev.get("total_eval") else 0
+    rows = {}
+    if os.path.exists(history_path):
+        with open(history_path, encoding="utf-8", newline="") as f:
+            for r in csv.DictReader(f):
+                rows[r["date"]] = r
+    rows[date_str] = {
+        "date": date_str, "total_eval": agg["total_eval"], "total_cost": agg["total_cost"],
+        "return_pct": f"{total_ret:.2f}", "dod_change": dod, "dod_pct": f"{dod_pct:.2f}",
+    }
+    os.makedirs(os.path.dirname(history_path) or ".", exist_ok=True)
+    with open(history_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["date", "total_eval", "total_cost",
+                                          "return_pct", "dod_change", "dod_pct"])
+        w.writeheader()
+        for dt in sorted(rows.keys()):
+            w.writerow(rows[dt])
+    return state
+
+
+def _h(text):
+    """HTML 이스케이프(최소)."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def build_html(summary):
+    """단독 열람용 HTML 브리핑."""
+    s = summary
+    pos = "#e03131"  # 상승(빨강, 한국 관습)
+    neg = "#1971c2"  # 하락(파랑)
+
+    def col(n):
+        return pos if n > 0 else (neg if n < 0 else "#868e96")
+
+    parts = []
+    parts.append(f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>자산 데일리 브리핑 — {_h(s['header_date'])}</title>
+<style>
+:root{{color-scheme:light dark}}
+body{{font-family:-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;
+max-width:760px;margin:0 auto;padding:24px 18px;line-height:1.55;
+background:#fff;color:#212529}}
+@media(prefers-color-scheme:dark){{body{{background:#1a1b1e;color:#e9ecef}}
+.card{{background:#25262b!important;border-color:#373a40!important}}
+th{{background:#2c2e33!important}}}}
+h1{{font-size:20px;margin:0 0 4px}}
+.sub{{color:#868e96;font-size:13px;margin-bottom:18px}}
+.card{{border:1px solid #e9ecef;border-radius:12px;padding:16px 18px;margin:14px 0;background:#f8f9fa}}
+.total{{font-size:30px;font-weight:800;letter-spacing:-.5px}}
+.dod{{font-size:15px;font-weight:600;margin-top:2px}}
+.ret{{font-size:14px;color:#495057;margin-top:6px}}
+table{{width:100%;border-collapse:collapse;font-size:14px;margin-top:6px}}
+th,td{{padding:8px 6px;border-bottom:1px solid #e9ecef;text-align:right}}
+th:first-child,td:first-child{{text-align:left}}
+th{{background:#f1f3f5;font-weight:600;font-size:12px;color:#495057}}
+h2{{font-size:15px;margin:22px 0 6px}}
+.mono{{font-variant-numeric:tabular-nums}}
+</style></head><body>
+<h1>📊 자산 데일리 브리핑</h1>
+<div class="sub">{_h(s['header_date'])} · 자동 생성</div>
+<div class="card">
+<div class="total mono">{_h(won(s['total_eval']))}</div>""")
+
+    if s["has_prev"]:
+        c = col(s["dod"])
+        parts.append(f'<div class="dod mono" style="color:{c}">전일 대비 {_h(signed_won(s["dod"]))} '
+                     f'({_h(signed_pct(s["dod_pct"]))}) {arrow(s["dod"])} '
+                     f'<span style="color:#868e96;font-weight:400">· 전일 {_h(won(s["prev_eval"]))}</span></div>')
+    else:
+        parts.append('<div class="dod" style="color:#868e96">첫 브리핑입니다 — 전일 비교는 내일부터 제공됩니다.</div>')
+    if s["total_ret"] is not None:
+        parts.append(f'<div class="ret mono">📈 총 수익률 <b>{_h(signed_pct(s["total_ret"],1))}</b> '
+                     f'(평가손익 {_h(signed_won(s["pl"]))} · 매입 {_h(won(s["total_cost"]))})</div>')
+    parts.append("</div>")
+
+    # 성격별
+    parts.append('<h2>성격별 현황</h2><table><tr><th>성격</th><th>평가금액</th><th>비중</th><th>전일 대비</th></tr>')
+    for n in s["natures"]:
+        emoji = NATURE_EMOJI.get(n["nat"], "•")
+        if n["dod"] is not None:
+            dcell = f'<span class="mono" style="color:{col(n["dod"])}">{_h(signed_won(n["dod"]))} {arrow(n["dod"])}</span>'
+        else:
+            dcell = "-"
+        parts.append(f'<tr><td>{emoji} {_h(n["nat"])}</td><td class="mono">{_h(won(n["eval"]))}</td>'
+                     f'<td class="mono">{n["weight"]:.1f}%</td><td>{dcell}</td></tr>')
+    parts.append("</table>")
+
+    # 상승/하락 또는 상위
+    if s["gainers"] or s["losers"]:
+        for title, arr in (("🔺 오늘의 상승 TOP", s["gainers"]), ("🔻 오늘의 하락 TOP", s["losers"])):
+            if not arr:
+                continue
+            parts.append(f'<h2>{title}</h2><table>')
+            for m in arr:
+                parts.append(f'<tr><td>{_h(m["h"]["name"])}<br><span style="color:#868e96;font-size:12px">{_h(m["h"]["account"])}</span></td>'
+                             f'<td class="mono" style="color:{col(m["change"])}">{_h(signed_won(m["change"]))}<br>{_h(signed_pct(m["pct"],1))}</td></tr>')
+            parts.append("</table>")
+    elif s["top_holdings"]:
+        parts.append('<h2>💎 평가금액 상위 종목</h2><table>')
+        for t in s["top_holdings"]:
+            parts.append(f'<tr><td>{_h(t["h"]["name"])}<br><span style="color:#868e96;font-size:12px">{_h(t["h"]["account"])}</span></td>'
+                         f'<td class="mono">{_h(won(t["h"]["eval"]))}<br>{t["weight"]:.1f}%</td></tr>')
+        parts.append("</table>")
+
+    # 계좌별
+    parts.append('<h2>📋 계좌별 현황</h2><table><tr><th>증권사 · 계좌</th><th>평가금액</th><th>전일 대비</th></tr>')
+    for a in s["accounts"]:
+        if a["dod"] is not None:
+            dcell = f'<span class="mono" style="color:{col(a["dod"])}">{_h(signed_won(a["dod"]))} {arrow(a["dod"])}</span>'
+        else:
+            dcell = "-"
+        parts.append(f'<tr><td>{_h(a["name"])}</td><td class="mono">{_h(won(a["eval"]))}</td><td>{dcell}</td></tr>')
+    parts.append("</table>")
+    parts.append(f'<div class="sub" style="margin-top:20px">생성: {datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")} · 데이터 출처: 금융자산현황표</div>')
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="시트 read 마크다운 파일")
