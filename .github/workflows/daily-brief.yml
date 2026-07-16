@@ -1,13 +1,19 @@
 name: 자산 데일리 브리핑
 
-# 매일 08:00 KST = 23:00 UTC. (GitHub Actions cron은 UTC 기준)
+# 08:00 KST = 23:00 UTC (Actions cron은 UTC 기준).
+# UTC 월~금(1-5) = KST 화~토 아침. 일·월(KST) 아침은 주말 뒤라 시장 변동이 없어 제외
+# → 무의미한 "0원 변동" 알림 방지(토요일은 금요일 밤 미국장 마감 반영이라 유지).
 on:
   schedule:
-    - cron: "0 23 * * *"
+    - cron: "0 23 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
         description: "테스트 실행(스냅샷 저장·Slack 발송 생략)"
+        type: boolean
+        default: false
+      force_send:
+        description: "직전과 동일해도 강제 발송(변동 없어도 전송)"
         type: boolean
         default: false
 
@@ -39,6 +45,10 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             FLAGS="--dry-run --no-slack"
             echo "::notice::dry-run 모드 — 스냅샷/Slack 생략"
+          fi
+          if [ "${{ inputs.force_send }}" = "true" ]; then
+            FLAGS="$FLAGS --always-send"
+            echo "::notice::force_send — 변동 없어도 발송"
           fi
           python generate.py $FLAGS
 

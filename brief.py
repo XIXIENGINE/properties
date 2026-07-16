@@ -185,8 +185,8 @@ def build_message(holdings, agg, prev, date_kst):
         dod = total_eval - prev["total_eval"]
         dod_pct = (dod / prev["total_eval"] * 100) if prev["total_eval"] else None
         lines.append(
-            f"> 전일 대비  **{signed_won(dod)}**  ({signed_pct(dod_pct)})  {arrow(dod)}"
-            f"  · 전일 {won(prev['total_eval'])}"
+            f"> 직전({prev.get('date','-')}) 대비  **{signed_won(dod)}**  "
+            f"({signed_pct(dod_pct)})  {arrow(dod)}  · 이전 {won(prev['total_eval'])}"
         )
     else:
         lines.append("> _첫 브리핑입니다 — 전일 비교 데이터는 내일부터 제공됩니다._")
@@ -251,7 +251,7 @@ def build_message(holdings, agg, prev, date_kst):
                 )
             lines.append("")
         if not gainers and not losers:
-            lines.append("_전일 대비 개별 종목 평가금액 변동이 없습니다._")
+            lines.append("_직전 대비 개별 종목 평가금액 변동이 없습니다._")
             lines.append("")
     else:
         # 첫 실행: 평가금액 상위 종목 안내
@@ -347,6 +347,7 @@ def compute_summary(holdings, agg, prev, date_kst):
         "pl": total_eval - total_cost,
         "has_prev": has_prev,
         "prev_eval": prev["total_eval"] if has_prev else None,
+        "prev_date": prev.get("date") if has_prev else None,
         "dod": dod,
         "dod_pct": dod_pct,
         "natures": natures,
@@ -367,8 +368,8 @@ def build_slack_blocks(summary):
         "emoji": True}})
 
     if s["has_prev"]:
-        dod_line = (f"전일 대비 *{signed_won(s['dod'])}*  ({signed_pct(s['dod_pct'])}) "
-                    f"{arrow(s['dod'])}  ·  전일 {won(s['prev_eval'])}")
+        dod_line = (f"직전({s['prev_date']}) 대비 *{signed_won(s['dod'])}*  "
+                    f"({signed_pct(s['dod_pct'])}) {arrow(s['dod'])}  ·  이전 {won(s['prev_eval'])}")
     else:
         dod_line = "_첫 브리핑입니다 — 전일 비교는 내일부터 제공됩니다._"
     top_text = f"*💰 총 평가금액*\n*{won(s['total_eval'])}*\n{dod_line}"
@@ -408,7 +409,7 @@ def build_slack_blocks(summary):
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": txt}})
     else:
         blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                       "text": "_전일 대비 개별 종목 변동이 없습니다._"}})
+                       "text": "_직전 대비 개별 종목 변동이 없습니다._"}})
     blocks.append({"type": "divider"})
 
     # 계좌별 (2열 필드)
@@ -511,9 +512,9 @@ h2{{font-size:15px;margin:22px 0 6px}}
 
     if s["has_prev"]:
         c = col(s["dod"])
-        parts.append(f'<div class="dod mono" style="color:{c}">전일 대비 {_h(signed_won(s["dod"]))} '
+        parts.append(f'<div class="dod mono" style="color:{c}">직전({_h(s["prev_date"])}) 대비 {_h(signed_won(s["dod"]))} '
                      f'({_h(signed_pct(s["dod_pct"]))}) {arrow(s["dod"])} '
-                     f'<span style="color:#868e96;font-weight:400">· 전일 {_h(won(s["prev_eval"]))}</span></div>')
+                     f'<span style="color:#868e96;font-weight:400">· 이전 {_h(won(s["prev_eval"]))}</span></div>')
     else:
         parts.append('<div class="dod" style="color:#868e96">첫 브리핑입니다 — 전일 비교는 내일부터 제공됩니다.</div>')
     if s["total_ret"] is not None:

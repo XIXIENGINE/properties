@@ -133,6 +133,8 @@ def main():
     ap.add_argument("--date", default=None, help="기준일 YYYY-MM-DD (기본: 오늘 KST)")
     ap.add_argument("--dry-run", action="store_true", help="스냅샷/히스토리 미저장")
     ap.add_argument("--no-slack", action="store_true", help="Slack 발송 생략")
+    ap.add_argument("--always-send", action="store_true",
+                    help="직전과 동일해도 강제 발송(수동 테스트용). 환경변수 ALWAYS_SEND로도 지정")
     ap.add_argument("--input", default=None,
                     help="xlsx 대신 로컬 마크다운 파일로 파싱(테스트용)")
     args = ap.parse_args()
@@ -166,7 +168,18 @@ def main():
             prev = json.load(open(args.state, encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             prev = None
-    print(f"[prev] {'전일 스냅샷 '+prev['date'] if prev else '없음(첫 실행)'}")
+    print(f"[prev] {'직전 스냅샷 '+prev['date'] if prev else '없음(첫 실행)'}")
+
+    # 주말·휴일 등 직전과 완전히 동일하면 무의미한 알림을 피한다.
+    env_always = os.environ.get("ALWAYS_SEND", "").strip().lower() not in ("", "0", "false", "no")
+    always_send = args.always_send or env_always
+    unchanged = (prev is not None
+                 and prev.get("total_eval") == agg["total_eval"]
+                 and prev.get("holdings") == agg["holdings"])
+    if unchanged and not always_send:
+        print("[skip] 직전 스냅샷과 자산 구성·평가금액이 동일 → 발송/저장 생략 "
+              "(주말·휴일 등 변동 없음). 강제 발송은 --always-send / ALWAYS_SEND=1")
+        return
 
     summary = brief.compute_summary(holdings, agg, prev, date_kst)
     md, acct = brief.build_message(holdings, agg, prev, date_kst)
