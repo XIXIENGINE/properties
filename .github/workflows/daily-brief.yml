@@ -40,6 +40,7 @@ jobs:
       - name: Generate & send brief
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LIVE_PRICES: "1"   # 실시간 시세로 평가금액 자동 계산
         run: |
           FLAGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then

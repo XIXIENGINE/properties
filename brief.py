@@ -167,7 +167,7 @@ def nature_sort_key(nat):
     return (NATURE_ORDER.index(nat) if nat in NATURE_ORDER else len(NATURE_ORDER), nat)
 
 
-def build_message(holdings, agg, prev, date_kst):
+def build_message(holdings, agg, prev, date_kst, extra_note=None):
     total_eval = agg["total_eval"]
     total_cost = agg["total_cost"]
     total_ret = ((total_eval - total_cost) / total_cost * 100) if total_cost else None
@@ -284,12 +284,15 @@ def build_message(holdings, agg, prev, date_kst):
             dod_cell = "-"
         lines.append(f"| {k} | {won(acct[k])} | {dod_cell} |")
     lines.append("")
-    lines.append(f"_생성: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 데이터 출처: 금융자산현황표_")
+    foot = f"생성: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 데이터 출처: 금융자산현황표"
+    if extra_note:
+        foot += f" · {extra_note}"
+    lines.append(f"_{foot}_")
 
     return "\n".join(lines), acct
 
 
-def compute_summary(holdings, agg, prev, date_kst):
+def compute_summary(holdings, agg, prev, date_kst, extra_note=None):
     """세 가지 렌더러(마크다운/Slack/HTML)가 공유하는 계산 결과."""
     total_eval = agg["total_eval"]
     total_cost = agg["total_cost"]
@@ -356,6 +359,7 @@ def compute_summary(holdings, agg, prev, date_kst):
         "top_holdings": top_holdings,
         "accounts": accounts,
         "acct_map": acct,
+        "extra_note": extra_note,
     }
 
 
@@ -420,8 +424,10 @@ def build_slack_blocks(summary):
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*📋 계좌별 현황*"},
                    "fields": acct_fields[:10]})
 
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
-                   "text": f"자동 브리핑 · {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 출처: 금융자산현황표"}]})
+    ctx = f"자동 브리핑 · {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 출처: 금융자산현황표"
+    if s.get("extra_note"):
+        ctx += f" · {s['extra_note']}"
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": ctx}]})
     return blocks
 
 
@@ -560,7 +566,10 @@ h2{{font-size:15px;margin:22px 0 6px}}
             dcell = "-"
         parts.append(f'<tr><td>{_h(a["name"])}</td><td class="mono">{_h(won(a["eval"]))}</td><td>{dcell}</td></tr>')
     parts.append("</table>")
-    parts.append(f'<div class="sub" style="margin-top:20px">생성: {datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")} · 데이터 출처: 금융자산현황표</div>')
+    foot = f'생성: {datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")} · 데이터 출처: 금융자산현황표'
+    if s.get("extra_note"):
+        foot += f' · {_h(s["extra_note"])}'
+    parts.append(f'<div class="sub" style="margin-top:20px">{foot}</div>')
     parts.append("</body></html>")
     return "".join(parts)
 

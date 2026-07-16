@@ -22,6 +22,7 @@ import urllib.request
 from datetime import datetime
 
 import brief  # 같은 저장소의 파싱/집계/렌더러
+import prices  # 실시간 시세 조회
 
 SHEET_ID = "1MLuYEdJUUuhQ6V3hp7WSmsIFeFRo9LIHL23_wcdezFw"
 XLSX_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
@@ -135,6 +136,8 @@ def main():
     ap.add_argument("--no-slack", action="store_true", help="Slack 발송 생략")
     ap.add_argument("--always-send", action="store_true",
                     help="직전과 동일해도 강제 발송(수동 테스트용). 환경변수 ALWAYS_SEND로도 지정")
+    ap.add_argument("--live-prices", action="store_true",
+                    help="실시간 시세로 평가금액 자동 계산(수량×현재가×환율). 환경변수 LIVE_PRICES로도")
     ap.add_argument("--input", default=None,
                     help="xlsx 대신 로컬 마크다운 파일로 파싱(테스트용)")
     args = ap.parse_args()
@@ -159,6 +162,18 @@ def main():
         sys.exit(2)
     print(f"[parse] {len(holdings)}개 종목")
 
+    # 실시간 시세 반영(옵션)
+    env_live = os.environ.get("LIVE_PRICES", "").strip().lower() not in ("", "0", "false", "no")
+    extra_note = None
+    if args.live_prices or env_live:
+        holdings, rep = prices.enrich_holdings(holdings)
+        extra_note = prices.report_note(rep)
+        fx_txt = f"{rep['fx']:,.1f}" if rep.get("fx") else "N/A"
+        print(f"[price] 실시간 {rep['live']}건 · 폴백 {rep['fallback']}건 · "
+              f"보유0 스킵 {rep['held_skipped']}건 · USD/KRW {fx_txt}")
+        if rep["failures"]:
+            print(f"[price] 조회 실패(시트값 사용): {', '.join(rep['failures'])}")
+
     agg = brief.aggregate(holdings)
     print(f"[agg] 총 평가금액 {agg['total_eval']:,}원 · 매입 {agg['total_cost']:,}원")
 
@@ -181,8 +196,8 @@ def main():
               "(주말·휴일 등 변동 없음). 강제 발송은 --always-send / ALWAYS_SEND=1")
         return
 
-    summary = brief.compute_summary(holdings, agg, prev, date_kst)
-    md, acct = brief.build_message(holdings, agg, prev, date_kst)
+    summary = brief.compute_summary(holdings, agg, prev, date_kst, extra_note=extra_note)
+    md, acct = brief.build_message(holdings, agg, prev, date_kst, extra_note=extra_note)
     blocks = brief.build_slack_blocks(summary)
     html = brief.build_html(summary)
 
