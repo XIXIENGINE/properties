@@ -1,0 +1,5 @@
+# 매일 실행 시 생성되는 전이 파일(시트 원본 덤프 / 생성된 메시지)
+data/today_raw.md
+data/brief.md
+__pycache__/
+*.pyc
