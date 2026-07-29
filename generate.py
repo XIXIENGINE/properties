@@ -16,6 +16,7 @@ GitHub Actions 러너용 자산 브리핑 생성/발송기.
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import urllib.request
@@ -62,18 +63,44 @@ def _to_int(v):
         return 0
 
 
+def _sheet_owner(rows, header_idx, fallback):
+    """입력 탭의 제목 행에서 보유자 이름을 뽑는다.
+
+    예: '입력 시트 · 이수진   (증권사 → 계좌 순 · 이수진 자산만)' -> '이수진'
+    """
+    for row in rows[:header_idx]:
+        for c in row:
+            t = _cell_str(c)
+            if "입력" in t and "시트" in t:
+                m = re.search(r"입력\s*시트\s*[·:\-]\s*([^\s(·]+)", t)
+                if m:
+                    return m.group(1).strip()
+    # 폴백: 시트 이름에서 구분자 뒤쪽('입력_이수진' 등)
+    t = (fallback or "").strip()
+    for sep in ("·", "_", "-", " "):
+        if sep in t:
+            tail = t.split(sep)[-1].strip()
+            if tail and "입력" not in tail:
+                return tail
+    return t or "미상"
+
+
 def parse_xlsx(path):
-    """모든 시트를 훑어 '종목명'과 '평가금액' 헤더가 있는 표를 찾아 보유 종목을 만든다."""
+    """모든 '입력 탭'을 읽어 보유자별 보유 종목을 합쳐서 돌려준다.
+
+    입력 탭 판별: 헤더에 '증권사'·'종목명'·'평가금액'이 함께 있는 시트.
+    (보유자 열을 쓰는 '상세현황' 탭이나 대시보드·분류 탭은 자동으로 제외된다.)
+    같은 계좌·종목명이 두 사람 모두에게 있을 수 있으므로 key에 보유자를 포함한다.
+    """
     from openpyxl import load_workbook
     wb = load_workbook(path, data_only=True, read_only=True)
-    best = []
+    merged, sheets = [], []
     for ws in wb.worksheets:
         rows = list(ws.iter_rows(values_only=True))
-        # 헤더 행 탐색
         header_idx, colmap = None, {}
         for i, row in enumerate(rows):
             labels = [_cell_str(c) for c in row]
-            if "종목명" in labels and "평가금액" in labels:
+            if "종목명" in labels and "평가금액" in labels and "증권사" in labels:
                 header_idx = i
                 for j, lab in enumerate(labels):
                     if lab in HEADER_MAP:
@@ -82,6 +109,7 @@ def parse_xlsx(path):
         if header_idx is None or "name" not in colmap or "eval" not in colmap:
             continue
 
+        owner = _sheet_owner(rows, header_idx, getattr(ws, "title", ""))
         holdings = []
         for row in rows[header_idx + 1:]:
             def cell(field):
@@ -98,6 +126,7 @@ def parse_xlsx(path):
             account = _cell_str(cell("account"))
             holdings.append({
                 "no": int(float(no_raw)),
+                "owner": owner,
                 "broker": broker,
                 "account": account,
                 "name": name,
@@ -107,12 +136,15 @@ def parse_xlsx(path):
                 "eval": _to_int(cell("eval")),
                 "ret": None,
                 "nature": _cell_str(cell("nature")) or "기타",
-                "key": f"{broker}|{account}|{name}",
+                "key": f"{owner}|{broker}|{account}|{name}",
             })
-        if len(holdings) > len(best):
-            best = holdings
+        if holdings:
+            merged.extend(holdings)
+            sheets.append(f"{owner}({len(holdings)})")
     wb.close()
-    return best
+    if sheets:
+        print(f"[parse] 입력 탭 {len(sheets)}개: {', '.join(sheets)}")
+    return merged
 
 
 def post_slack(webhook, blocks, fallback_text):
@@ -191,6 +223,16 @@ def main():
             prev = None
     print(f"[prev] {'직전 스냅샷 '+prev['date'] if prev else '없음(첫 실행)'}")
 
+    # 키 체계가 바뀐 경우(예: 보유자 구분 추가) 이전 스냅샷과는 비교할 수 없다.
+    # 잘못된 급등락을 보여주는 대신 오늘을 새 기준으로 삼는다.
+    baseline_reset = False
+    if prev and prev.get("holdings"):
+        if not (set(prev["holdings"]) & {h["key"] for h in holdings}):
+            print("[prev] ⚠️ 이전 스냅샷과 종목 키 체계가 달라 비교 기준을 재설정합니다 "
+                  "(오늘이 새 기준 · 전일 대비는 다음 실행부터)")
+            prev = None
+            baseline_reset = True
+
     # 주말·휴일 등 직전과 완전히 동일하면 무의미한 알림을 피한다.
     env_always = os.environ.get("ALWAYS_SEND", "").strip().lower() not in ("", "0", "false", "no")
     always_send = args.always_send or env_always
@@ -201,6 +243,10 @@ def main():
         print("[skip] 직전 스냅샷과 자산 구성·평가금액이 동일 → 발송/저장 생략 "
               "(주말·휴일 등 변동 없음). 강제 발송은 --always-send / ALWAYS_SEND=1")
         return
+
+    if baseline_reset:
+        note = "가계 합산(보유자 구분) 기준으로 변경 — 전일 대비는 다음 브리핑부터"
+        extra_note = f"{extra_note} · {note}" if extra_note else note
 
     summary = brief.compute_summary(holdings, agg, prev, date_kst, extra_note=extra_note)
     md, acct = brief.build_message(holdings, agg, prev, date_kst, extra_note=extra_note)

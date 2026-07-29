@@ -98,7 +98,7 @@ def _to_pct(s):
     return -v if neg else v
 
 
-def parse_holdings(text):
+def parse_holdings(text, owner=""):
     """마크다운 표에서 보유 종목 행을 추출한다.
 
     기대 컬럼(선행 빈칸 제외 1-기준):
@@ -132,6 +132,7 @@ def parse_holdings(text):
             continue
         holdings.append({
             "no": int(no_raw),
+            "owner": owner,
             "broker": broker,
             "account": account,
             "name": name,
@@ -141,7 +142,8 @@ def parse_holdings(text):
             "eval": evalv or 0,
             "ret": ret,
             "nature": nature or "기타",
-            "key": f"{broker}|{account}|{name}",
+            "key": (f"{owner}|{broker}|{account}|{name}" if owner
+                    else f"{broker}|{account}|{name}"),
         })
     return holdings
 
@@ -149,16 +151,22 @@ def parse_holdings(text):
 def aggregate(holdings):
     total_eval = sum(h["eval"] for h in holdings)
     total_cost = sum(h["cost"] for h in holdings)
-    by_nature = {}
+    by_nature, by_owner = {}, {}
     for h in holdings:
         nat = h["nature"]
         b = by_nature.setdefault(nat, {"eval": 0, "cost": 0})
         b["eval"] += h["eval"]
         b["cost"] += h["cost"]
+        own = h.get("owner") or ""
+        if own:
+            o = by_owner.setdefault(own, {"eval": 0, "cost": 0})
+            o["eval"] += h["eval"]
+            o["cost"] += h["cost"]
     return {
         "total_eval": total_eval,
         "total_cost": total_cost,
         "by_nature": by_nature,
+        "by_owner": by_owner,
         "holdings": {h["key"]: h["eval"] for h in holdings},
     }
 
@@ -197,6 +205,27 @@ def build_message(holdings, agg, prev, date_kst, extra_note=None):
             f"(평가손익 {signed_won(pl)} · 매입 {won(total_cost)})"
         )
     lines.append("")
+
+    # ── 보유자별(가계 구성원) ────────────────────
+    by_own = agg.get("by_owner") or {}
+    if len(by_own) > 1:
+        prev_own_m = (prev or {}).get("by_owner", {}) or {}
+        lines.append("### 👥 보유자별")
+        lines.append("")
+        lines.append("| 보유자 | 평가금액 | 수익률 | 비중 | 전일 대비 |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for own in sorted(by_own, key=lambda k: -by_own[k]["eval"]):
+            b = by_own[own]
+            r = ((b["eval"] - b["cost"]) / b["cost"] * 100) if b["cost"] else None
+            w = (b["eval"] / total_eval * 100) if total_eval else 0
+            if own in prev_own_m:
+                od = b["eval"] - prev_own_m[own]["eval"]
+                oc = f"{signed_won(od)} {arrow(od)}"
+            else:
+                oc = "-"
+            lines.append(f"| {own} | {won(b['eval'])} | "
+                         f"{signed_pct(r, 1) if r is not None else '-'} | {w:.1f}% | {oc} |")
+        lines.append("")
 
     # ── 성격별 비중 / 전일 대비 ─────────────────
     lines.append("### 성격별 현황")
@@ -289,9 +318,10 @@ def build_message(holdings, agg, prev, date_kst, extra_note=None):
     prev_h2 = (prev or {}).get("holdings", {}) or {}
     lines.append("### 📄 개별 종목 상세 (전일 대비)")
     lines.append("")
-    lines.append("| 증권사·계좌 | 종목 | 평가금액 | 수익률 | 전일 대비 |")
+    lines.append("| 보유자·계좌 | 종목 | 평가금액 | 수익률 | 전일 대비 |")
     lines.append("|---|---|---:|---:|---:|")
-    for h in sorted(holdings, key=lambda x: (x["broker"], x["account"], -x["eval"])):
+    for h in sorted(holdings, key=lambda x: (x.get("owner") or "", x["broker"],
+                                             x["account"], -x["eval"])):
         if (h["eval"] or 0) <= 0:
             continue
         ret = ((h["eval"] - h["cost"]) / h["cost"] * 100) if h.get("cost") else None
@@ -301,7 +331,8 @@ def build_message(holdings, agg, prev, date_kst, extra_note=None):
             dcell = f"{signed_won(dod)} {arrow(dod)}"
         else:
             dcell = "-"
-        lines.append(f"| {h['broker']}·{h['account']} | {h['name']} | "
+        who = f"{h['owner']}·" if h.get("owner") else ""
+        lines.append(f"| {who}{h['broker']}·{h['account']} | {h['name']} | "
                      f"{won(h['eval'])} | {ret_c} | {dcell} |")
     lines.append("")
     foot = f"생성: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} · 데이터 출처: 금융자산현황표"
@@ -360,10 +391,25 @@ def compute_summary(holdings, agg, prev, date_kst, extra_note=None):
         a_dod = (acct[k] - prev_acct[k]) if (prev and k in prev_acct) else None
         accounts.append({"name": k, "eval": acct[k], "dod": a_dod})
 
+    # 보유자별(가계 구성원) 현황
+    prev_own = (prev or {}).get("by_owner", {}) or {}
+    owners = []
+    for own in sorted(agg.get("by_owner", {}).keys(),
+                      key=lambda k: -agg["by_owner"][k]["eval"]):
+        b = agg["by_owner"][own]
+        o_ret = ((b["eval"] - b["cost"]) / b["cost"] * 100) if b["cost"] else None
+        o_dod = (b["eval"] - prev_own[own]["eval"]) if own in prev_own else None
+        owners.append({
+            "name": own, "eval": b["eval"], "cost": b["cost"], "ret": o_ret,
+            "dod": o_dod,
+            "weight": (b["eval"] / total_eval * 100) if total_eval else 0,
+        })
+
     # 개별 종목 상세(보유 중인 것만, 계좌→평가금액 순)
     prev_h = (prev or {}).get("holdings", {}) or {}
     detail = []
-    for h in sorted(holdings, key=lambda x: (x["broker"], x["account"], -x["eval"])):
+    for h in sorted(holdings, key=lambda x: (x.get("owner") or "", x["broker"],
+                                             x["account"], -x["eval"])):
         if (h["eval"] or 0) <= 0:
             continue
         h_ret = ((h["eval"] - h["cost"]) / h["cost"] * 100) if h.get("cost") else None
@@ -371,7 +417,8 @@ def compute_summary(holdings, agg, prev, date_kst, extra_note=None):
         h_dod = (h["eval"] - h_base) if (prev and h["key"] in prev_h) else None
         h_dod_pct = (h_dod / h_base * 100) if (h_dod is not None and h_base) else None
         detail.append({
-            "broker": h["broker"], "account": h["account"], "name": h["name"],
+            "owner": h.get("owner") or "", "broker": h["broker"],
+            "account": h["account"], "name": h["name"],
             "eval": h["eval"], "ret": h_ret, "dod": h_dod, "dod_pct": h_dod_pct,
             "weight": (h["eval"] / total_eval * 100) if total_eval else 0,
         })
@@ -396,6 +443,7 @@ def compute_summary(holdings, agg, prev, date_kst, extra_note=None):
         "accounts": accounts,
         "acct_map": acct,
         "detail": detail,
+        "owners": owners,
         "extra_note": extra_note,
     }
 
@@ -427,6 +475,18 @@ def build_slack_blocks(summary):
         dod = f"  ({signed_won(n['dod'])} {arrow(n['dod'])})" if n["dod"] is not None else ""
         nat_fields.append({"type": "mrkdwn",
                            "text": f"{emoji} *{n['nat']}*\n{won(n['eval'])} · {n['weight']:.1f}%{dod}"})
+    # 보유자별(가계 구성원)
+    owners = s.get("owners") or []
+    if len(owners) > 1:
+        rows = []
+        for o in owners:
+            dod = f"  ({signed_won(o['dod'])} {arrow(o['dod'])})" if o["dod"] is not None else ""
+            ret = f" · 수익 {signed_pct(o['ret'], 1)}" if o["ret"] is not None else ""
+            rows.append(f"• *{o['name']}*  {won(o['eval'])} ({o['weight']:.1f}%){ret}{dod}")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": "*👥 보유자별*\n" + "\n".join(rows)}})
+        blocks.append({"type": "divider"})
+
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*성격별 현황*"},
                    "fields": nat_fields[:10]})
     blocks.append({"type": "divider"})
@@ -471,7 +531,8 @@ def build_slack_blocks(summary):
         groups = []
         cur_key, cur = None, None
         for it in detail:
-            k = f"{it['broker']} · {it['account']}"
+            k = (f"{it['owner']} · {it['broker']} · {it['account']}"
+                 if it.get("owner") else f"{it['broker']} · {it['account']}")
             if k != cur_key:
                 cur_key, cur = k, []
                 groups.append((k, cur))
@@ -595,6 +656,20 @@ h2{{font-size:15px;margin:22px 0 6px}}
                      f'(평가손익 {_h(signed_won(s["pl"]))} · 매입 {_h(won(s["total_cost"]))})</div>')
     parts.append("</div>")
 
+    # 보유자별
+    owners = s.get("owners") or []
+    if len(owners) > 1:
+        parts.append('<h2>👥 보유자별</h2><table><tr><th>보유자</th><th>평가금액</th>'
+                     '<th>수익률</th><th>비중</th><th>전일 대비</th></tr>')
+        for o in owners:
+            r = (f'<span class="mono" style="color:{col(o["ret"])}">{_h(signed_pct(o["ret"],1))}</span>'
+                 if o["ret"] is not None else "-")
+            d_ = (f'<span class="mono" style="color:{col(o["dod"])}">{_h(signed_won(o["dod"]))} {arrow(o["dod"])}</span>'
+                  if o["dod"] is not None else "-")
+            parts.append(f'<tr><td>{_h(o["name"])}</td><td class="mono">{_h(won(o["eval"]))}</td>'
+                         f'<td>{r}</td><td class="mono">{o["weight"]:.1f}%</td><td>{d_}</td></tr>')
+        parts.append("</table>")
+
     # 성격별
     parts.append('<h2>성격별 현황</h2><table><tr><th>성격</th><th>평가금액</th><th>비중</th><th>전일 대비</th></tr>')
     for n in s["natures"]:
@@ -642,7 +717,8 @@ h2{{font-size:15px;margin:22px 0 6px}}
                      '<th>비중</th><th>전일 대비</th></tr>')
         cur = None
         for it in detail:
-            g = f"{it['broker']} · {it['account']}"
+            g = (f"{it['owner']} · {it['broker']} · {it['account']}"
+                 if it.get("owner") else f"{it['broker']} · {it['account']}")
             if g != cur:
                 cur = g
                 parts.append(f'<tr><td colspan="5" style="background:#eef;font-weight:600;'
