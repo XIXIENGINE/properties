@@ -144,7 +144,33 @@ def parse_xlsx(path):
     wb.close()
     if sheets:
         print(f"[parse] 입력 탭 {len(sheets)}개: {', '.join(sheets)}")
-    return merged
+    return _merge_duplicates(merged)
+
+
+def _merge_duplicates(holdings):
+    """같은 보유자·계좌·종목이 여러 줄(분할 매수 등)이면 한 줄로 합친다.
+
+    key가 겹치면 스냅샷 딕셔너리에서 서로 덮어써져 종목별 전일 대비가 틀어지므로,
+    수량·매입금액·평가금액을 합산해 하나의 보유로 만든다.
+    """
+    out, index = [], {}
+    for h in holdings:
+        k = h["key"]
+        if k not in index:
+            index[k] = len(out)
+            out.append(h)
+            continue
+        tgt = out[index[k]]
+        tgt["cost"] += h["cost"]
+        tgt["eval"] += h["eval"]
+        try:
+            tgt["qty"] = str(float(tgt["qty"] or 0) + float(h["qty"] or 0))
+        except ValueError:
+            pass
+    if len(out) != len(holdings):
+        print(f"[parse] 중복 종목 {len(holdings) - len(out)}건 합산 "
+              f"(같은 계좌·종목의 여러 줄을 1건으로)")
+    return out
 
 
 def post_slack(webhook, blocks, fallback_text):
