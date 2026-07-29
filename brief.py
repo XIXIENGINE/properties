@@ -566,6 +566,7 @@ def persist_snapshot(agg, acct, prev, date_str, state_path, history_path, snapsh
         "total_eval": agg["total_eval"],
         "total_cost": agg["total_cost"],
         "by_nature": agg["by_nature"],
+        "by_owner": agg.get("by_owner", {}),
         "by_account": acct,
         "holdings": agg["holdings"],
     }
@@ -797,6 +798,7 @@ def main():
         "total_eval": agg["total_eval"],
         "total_cost": agg["total_cost"],
         "by_nature": agg["by_nature"],
+        "by_owner": agg.get("by_owner", {}),
         "by_account": acct,
         "holdings": agg["holdings"],
     }
