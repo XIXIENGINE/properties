@@ -44,7 +44,12 @@ jobs:
       - name: Generate & send brief
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          LIVE_PRICES: "1"   # 실시간 시세로 평가금액 자동 계산
+          # 데이터 출처는 냥돌폴리오 앱. 앱이 시세·환율까지 이미 반영해 계산한다.
+          NYANGDOL_APP_URL: ${{ secrets.NYANGDOL_APP_URL }}
+          NYANGDOL_APP_PASSWORD: ${{ secrets.NYANGDOL_APP_PASSWORD }}
+          BRIEF_SOURCE: ${{ vars.BRIEF_SOURCE || 'app' }}
+          # 시트 소스(비상용)로 돌릴 때만 쓰인다. 앱 소스에서는 무시된다.
+          LIVE_PRICES: "1"
         run: |
           FLAGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then

@@ -3,14 +3,21 @@
 GitHub Actions 러너용 자산 브리핑 생성/발송기.
 
 동작:
-  1. 공개 링크(anyone: reader) 스프레드시트를 xlsx로 내려받는다.
-  2. 보유 종목 시트를 찾아 파싱한다(탭 순서/gid에 의존하지 않음).
-  3. 전일 스냅샷과 비교해 브리핑을 만든다(brief.py의 계산/렌더러 재사용).
-  4. Slack Incoming Webhook으로 Block Kit 메시지를 보낸다.
-  5. 스냅샷/히스토리/HTML을 저장한다.
+  1. 냥돌폴리오 앱의 보유현황 CSV를 받는다 (기본 출처).
+     앱이 이미 거래를 접어 보유수량·평단을 내고 실시간 시세·환율까지 반영하므로
+     여기서 다시 계산하지 않는다. 계산 경로가 둘이면 화면과 브리핑이 갈린다.
+  2. 전일 스냅샷과 비교해 브리핑을 만든다(brief.py의 계산/렌더러 재사용).
+  3. Slack Incoming Webhook으로 Block Kit 메시지를 보낸다.
+  4. 스냅샷/히스토리/HTML을 저장한다.
+
+앱에서 받지 못하면(Supabase 일시정지 등) 조용히 죽지 않고 원인을 Slack으로 알린다.
+구글 시트 파싱 경로는 --source sheet 로 남겨 두었다 (앱이 오래 내려갔을 때의 비상용).
 
 환경변수:
-  SLACK_WEBHOOK_URL : Slack Incoming Webhook (없으면 발송 생략, 미리보기만 출력)
+  SLACK_WEBHOOK_URL      : Slack Incoming Webhook (없으면 발송 생략, 미리보기만 출력)
+  NYANGDOL_APP_URL       : 앱 주소 (예: https://nyangdol-folio-969u.vercel.app)
+  NYANGDOL_APP_PASSWORD  : 앱 공용 비밀번호 (앱의 APP_PASSWORD 와 같은 값)
+  BRIEF_SOURCE           : app(기본) | sheet
 """
 
 import argparse
@@ -22,6 +29,7 @@ import tempfile
 import urllib.request
 from datetime import datetime
 
+import app_source  # 냥돌폴리오 앱 CSV 내보내기
 import brief  # 같은 저장소의 파싱/집계/렌더러
 import prices  # 실시간 시세 조회
 
@@ -174,7 +182,11 @@ def _merge_duplicates(holdings):
 
 
 def post_slack(webhook, blocks, fallback_text):
-    payload = json.dumps({"text": fallback_text, "blocks": blocks}).encode("utf-8")
+    body = {"text": fallback_text}
+    # blocks 를 null 로 보내면 Slack 이 거부한다. 실패 알림처럼 텍스트만 보낼 때가 있다.
+    if blocks:
+        body["blocks"] = blocks
+    payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=payload,
         headers={"Content-Type": "application/json"}, method="POST")
@@ -198,6 +210,9 @@ def main():
                     help="실시간 시세로 평가금액 자동 계산(수량×현재가×환율). 환경변수 LIVE_PRICES로도")
     ap.add_argument("--input", default=None,
                     help="xlsx 대신 로컬 마크다운 파일로 파싱(테스트용)")
+    ap.add_argument("--source", choices=("app", "sheet"), default=None,
+                    help="데이터 출처. app=냥돌폴리오 앱(기본) · sheet=구글 시트(비상용). "
+                         "환경변수 BRIEF_SOURCE 로도 지정")
     args = ap.parse_args()
 
     if args.date:
@@ -206,10 +221,31 @@ def main():
         date_kst = datetime.now(brief.KST)
     date_str = date_kst.strftime("%Y-%m-%d")
 
+    source = args.source or os.environ.get("BRIEF_SOURCE", "").strip() or "app"
+    webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+
     # 1) 보유 종목 파싱
+    from_app = False
     if args.input:
         holdings = brief.parse_holdings(open(args.input, encoding="utf-8").read())
         print(f"[in] 로컬 마크다운 파싱: {args.input}")
+    elif source == "app":
+        # 앱이 이미 시세·환율까지 반영해 계산한 값을 받는다. 여기서 다시 계산하지 않는다.
+        try:
+            base_url, password = app_source.config_from_env()
+            holdings = app_source.load_holdings(base_url, password)
+        except app_source.AppUnavailable as e:
+            # 조용히 죽으면 며칠 뒤에야 안 온 걸 알게 된다. 원인을 Slack 으로 알린다.
+            print(f"ERROR: {e.message} {e.hint or ''}".strip(), file=sys.stderr)
+            if webhook and not args.no_slack:
+                brief_text = f"⚠️ 자산 브리핑을 만들지 못했습니다\n{e.message}"
+                if e.hint:
+                    brief_text += f"\n{e.hint}"
+                post_slack(webhook, None, brief_text)
+                print("[slack] 실패 알림 발송")
+            sys.exit(2)
+        from_app = True
+        print(f"[fetch] 앱 {base_url} · 보유현황 CSV")
     else:
         tmp = os.path.join(tempfile.gettempdir(), "sheet.xlsx")
         n = download_xlsx(tmp)
@@ -218,12 +254,18 @@ def main():
     if not holdings:
         print("ERROR: 보유 종목을 파싱하지 못했습니다.", file=sys.stderr)
         sys.exit(2)
-    print(f"[parse] {len(holdings)}개 종목")
+    print(f"[parse] {len(holdings)}개 종목 (출처: {'앱' if from_app else '시트'})")
 
     # 실시간 시세 반영(옵션)
+    # 앱에서 받은 값은 이미 앱이 시세·환율을 반영한 결과다. 여기서 또 조회하면
+    # 같은 자산이 두 경로로 계산되어 화면과 브리핑이 갈린다.
     env_live = os.environ.get("LIVE_PRICES", "").strip().lower() not in ("", "0", "false", "no")
     extra_note = None
-    if args.live_prices or env_live:
+    if from_app:
+        if args.live_prices or env_live:
+            print("[price] 앱 소스에서는 시세를 다시 조회하지 않습니다 (앱이 이미 반영).")
+        extra_note = "냥돌폴리오 앱 기준 (시세·환율 앱 계산값)"
+    elif args.live_prices or env_live:
         holdings, rep = prices.enrich_holdings(holdings)
         extra_note = prices.report_note(rep)
         fx_txt = f"{rep['fx']:,.1f}" if rep.get("fx") else "N/A"
@@ -285,7 +327,6 @@ def main():
     print(f"[render] {args.out_md} · {args.out_html}")
 
     # 4) Slack 발송
-    webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
     if args.no_slack or not webhook:
         reason = "--no-slack" if args.no_slack else "SLACK_WEBHOOK_URL 없음"
         print(f"[slack] 발송 생략({reason}). 블록 미리보기:")
